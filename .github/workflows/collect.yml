@@ -29,10 +29,14 @@ jobs:
           YT_API_KEY: ${{ secrets.YT_API_KEY }}
         run: python youtube_rank_collector.py
 
-      - name: Commit results
+      - name: Commit results (with retry)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data.json dashboard.html
-          git commit -m "update ranks" || echo "no changes"
-          git push
+          git commit -m "update ranks" || { echo "변경 없음"; exit 0; }
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main && git push origin HEAD:main && exit 0
+            echo "저장 충돌 - 재시도 $i ..."; sleep 5
+          done
+          echo "push 최종 실패"; exit 1
