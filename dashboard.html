@@ -1,126 +1,157 @@
-/* ============================================================
- * clinic-aggregate.js
- * 유튜브 상위노출 데이터를 "성형외과(병원) 단위"로 묶어
- * 노출 점유율(%)을 계산하는 모듈.
- *
- * 사용 전제 (dashboard.html의 데이터 구조에 맞게 FIELD만 수정하세요)
- *   각 행(row) = 특정 키워드 검색결과에서 특정 영상이 차지한 1개 순위
- *   예) { keyword: "코성형", rank: 3, videoId: "abc",
- *         title: "...", description: "...", channelTitle: "..." }
- * ============================================================ */
-
-/* ---------- 0. 필드명 매핑 (여기만 데이터에 맞게 고치면 됩니다) ---------- */
-const FIELD = {
-  keyword: 'keyword',
-  rank: 'rank',
-  title: 'title',
-  description: 'description',
-  channel: 'channelTitle',
-  videoId: 'videoId',
-};
-
-/* ---------- 1. 병원명 사전 ----------
- * name    : 대시보드에 표시할 정식 병원명
- * patterns: 제목/설명/채널명에서 찾을 표기 변형들 (띄어쓰기 무시, 대소문자 무시)
- * 새 병원은 여기에 한 줄씩 추가하면 자동으로 집계에 잡힙니다.
- */
-const CLINIC_PATTERNS = [
-  { name: '팝성형외과',   patterns: ['팝성형외과', '팝성형', 'pop성형외과', 'popps'] },
-  { name: 'A성형외과',    patterns: ['a성형외과', '에이성형외과'] },
-  { name: '뷰티라인성형외과', patterns: ['뷰티라인성형외과', '뷰티라인'] },
-  // TODO: 경쟁 병원 계속 추가
-];
-
-/* 표기 흔들림 제거: 공백/특수문자 제거 + 소문자화 */
-function normalize(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[\s\u200b·・.,\-_()\[\]]/g, '');
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>팝성형외과 유튜브 상위노출 대시보드</title>
+<style>
+:root{--bg:#0f1720;--panel:#161f2b;--p2:#1c2836;--line:#26333f;--ink:#e8eef5;--mut:#93a4b5;--faint:#6b7d8f;
+--ok:#30a46c;--beyond:#3b4b5c;--err:#e5484d;--warn:#f5a623;--accent:#4c8dff;--gold:#e5b53b;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Malgun Gothic","Segoe UI",Roboto,sans-serif;line-height:1.55}
+.wrap{max-width:1120px;margin:0 auto;padding:24px 20px 80px}
+h1{font-size:21px;margin:0 0 3px}
+.sub{color:var(--mut);font-size:12.5px;margin-bottom:18px}
+.tabs{display:flex;gap:8px;margin-bottom:22px;border-bottom:1px solid var(--line)}
+.tab{padding:11px 18px;font-size:14px;font-weight:700;color:var(--mut);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent)}
+.view{display:none} .view.on{display:block}
+.subtabs{display:flex;gap:6px;margin-bottom:16px}
+.stab{padding:6px 13px;font-size:12.5px;border-radius:20px;background:var(--panel);border:1px solid var(--line);color:var(--mut);cursor:pointer}
+.stab.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:22px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px}
+.kpi .l{font-size:11px;color:var(--mut);font-weight:600;margin-bottom:5px}
+.kpi .v{font-size:20px;font-weight:700}
+.kpi.good .v{color:var(--ok)} .kpi.warn .v{color:var(--warn)} .kpi.bad .v{color:var(--err)}
+h2{font-size:15px;margin:26px 0 4px} .note{color:var(--mut);font-size:12.5px;margin:0 0 14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.dcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px;cursor:pointer}
+.dcard:hover{border-color:var(--accent);background:var(--p2)}
+.dcard .d{font-size:15px;font-weight:700;margin-bottom:8px}
+.dcard .row{display:flex;justify-content:space-between;font-size:12.5px;color:var(--mut);padding:2px 0}
+.dcard .row b{color:var(--ink)} .dcard .go{color:var(--accent);font-size:11.5px;margin-top:8px}
+.back{color:var(--accent);cursor:pointer;font-size:13px;margin-bottom:12px;display:inline-block}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;color:var(--mut);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid #1e2a36} tr:hover td{background:var(--p2)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.tag{font-size:10px;padding:2px 7px;border-radius:5px;font-weight:600}
+.tag.ok{background:#123726;color:#7ee2b0}.tag.beyond{background:#2a3542;color:#93a4b5}.tag.err{background:#4a1d21;color:#ff9ea1}.tag.off{background:#3a2a10;color:#f5c977}
+.rankbig{font-weight:700}.rankbig.g{color:var(--gold)}.rankbig.k{color:var(--ok)}
+.tier{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px;margin-bottom:12px;border-left:4px solid var(--line)}
+.tier.t1{border-left-color:var(--gold)}.tier.t2{border-left-color:var(--ok)}.tier.t3{border-left-color:var(--accent)}.tier.t4{border-left-color:var(--faint)}.tier.risk{border-left-color:var(--err)}
+.tier h3{margin:0 0 4px;font-size:14px}.tier .desc{font-size:12.5px;color:var(--mut);margin-bottom:10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-size:12px;padding:4px 10px;border-radius:16px;background:var(--p2);border:1px solid var(--line)}
+.chip b{color:var(--gold)}
+.act{display:flex;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px;margin-bottom:10px}
+.act .rn{width:24px;height:24px;border-radius:7px;background:var(--accent);color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:12px}
+.act .at{font-size:13.5px;font-weight:700;margin-bottom:2px}.act .ad{font-size:12.5px;color:var(--mut)}
+.ideacard{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px;margin-bottom:10px}
+.ideacard .kw{font-size:13.5px;font-weight:700;display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.ideacard ul{margin:0;padding-left:18px}.ideacard li{font-size:12.5px;margin:4px 0}
+.compkw{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px;margin-bottom:10px}
+.compkw .h{font-size:13.5px;font-weight:700;margin-bottom:9px;display:flex;align-items:center;gap:8px}
+.vid{display:flex;gap:9px;padding:6px 0;border-top:1px solid #1e2a36;font-size:12px}
+.vid:first-of-type{border-top:0}.vid .n{color:var(--faint);width:16px;flex-shrink:0}
+.vid .tt{flex:1}.vid .cc{color:var(--mut);font-size:11px}
+.vid.mine .tt{color:#7ee2b0;font-weight:600}
+.pat{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.pat .p{font-size:11px;padding:3px 9px;border-radius:14px;background:#13233a;border:1px solid #24425f;color:#9ec5ff}
+.foot{color:var(--faint);font-size:11.5px;margin-top:28px;text-align:center}
+@media(max-width:820px){.kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:520px){.kpis{grid-template-columns:repeat(2,1fr)}}
+</style></head><body><div class="wrap">
+<h1>팝성형외과 유튜브 상위노출 대시보드</h1>
+<div class="sub">채널 <b id="ch"></b> · 쇼츠 상위노출 기준 · 최신 수집일 <b id="ld"></b> · 추적 키워드 <b id="nk"></b>개 · 생성 <span id="gen"></span></div>
+<div class="tabs">
+  <div class="tab on" data-v="numbers">📊 수치 대시보드</div>
+  <div class="tab" data-v="content">💡 콘텐츠 추천</div>
+</div>
+<div class="view on" id="view-numbers">
+  <div class="subtabs">
+    <div class="stab on" data-s="dates">📅 날짜별 보기</div>
+    <div class="stab" data-s="trend">📈 전체 추이</div>
+  </div>
+  <div id="num-dates">
+    <p class="note">추적 중인 날짜입니다. 카드를 클릭하면 그 날짜의 키워드별 순위 상세로 이동합니다.</p>
+    <div class="dgrid" id="dgrid"></div>
+  </div>
+  <div id="num-detail" style="display:none">
+    <span class="back" id="backBtn">← 날짜 목록으로</span>
+    <h2 id="detailDate" style="margin-top:0"></h2>
+    <div class="kpis" id="detailKpis"></div>
+    <div class="panel" style="padding:6px 10px">
+      <table id="detailTable"><thead><tr><th data-k="kw">키워드</th><th data-k="rank" class="num">순위</th><th data-k="st">상태</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div id="num-trend" style="display:none">
+    <p class="note">전체 추적 기간의 TOP50 진입 키워드 수 추이입니다.</p>
+    <div class="panel"><canvas id="trendCanvas" width="1040" height="180" style="width:100%;height:180px"></canvas></div>
+    <h2>키워드 × 날짜 순위 히트맵</h2>
+    <div class="panel"><div style="overflow-x:auto"><table id="heat" style="border-collapse:collapse"></table></div></div>
+  </div>
+</div>
+<div class="view" id="view-content">
+  <div class="kpis" id="cKpis"></div>
+  <h2>🎯 이번주 우선 액션</h2>
+  <p class="note">오늘 데이터 기준으로 가장 효과가 클 것으로 보이는 순서입니다.</p>
+  <div id="actions"></div>
+  <h2>📊 기회 · 위험 분석</h2>
+  <div id="oppRisk"></div>
+  <h2>✍️ 키워드별 콘텐츠 아이디어</h2>
+  <div id="ideas"></div>
+  <h2>🏥 타병원 상위 콘텐츠 분석</h2>
+  <p class="note">각 키워드 상위 3개 경쟁사 영상입니다. (초록색 = 우리 채널)</p>
+  <div id="comp"></div>
+</div>
+<div class="foot">데이터: YouTube Data API · 내 PC에서 매일 자동 수집 · 이 파일을 열면 마지막 수집 결과가 표시됩니다.</div>
+</div>
+<script id="p" type="application/json">{"generated": "2026-08-20 07:50", "channel": "팝성형외과 POP TV", "keywords": ["압구정쌍수", "눈성형", "눈수술", "눈추천", "12홀자연유착", "자연유착", "자연유착쌍수", "매몰법", "절개법", "쌍꺼풀", "쌍꺼풀수술", "눈재수술", "쌍꺼풀재수술", "인라인", "인아웃라인", "세미아웃", "세미아웃라인", "아웃라인", "트임", "앞트임", "위트임", "뒤트임", "밑트임", "상안검", "하안검", "눈매교정", "눈밑지방재배치", "눈썹하거상", "리프팅추천", "거상수술", "안면거상", "이마거상", "미니거상", "실리프팅", "리프팅", "이중턱", "남자눈성형", "코수술", "코성형", "코추천"], "dates": ["2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-15", "2026-08-16", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"], "history": {"2026-08-10": {"눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 45, "s": "ok"}, "매몰법": {"r": null, "s": "error"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "error"}, "눈재수술": {"r": null, "s": "error"}, "인라인": {"r": null, "s": "error"}, "인아웃라인": {"r": null, "s": "error"}, "세미아웃라인": {"r": null, "s": "error"}, "아웃라인": {"r": null, "s": "error"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "error"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "error"}, "상안검": {"r": null, "s": "error"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "error"}, "눈밑지방재배치": {"r": null, "s": "error"}, "눈썹하거상": {"r": null, "s": "error"}, "안면거상": {"r": null, "s": "error"}, "이마거상": {"r": null, "s": "error"}, "미니거상": {"r": null, "s": "error"}, "거상": {"r": null, "s": "error"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "error"}, "이중턱": {"r": null, "s": "error"}, "남자눈성형": {"r": null, "s": "error"}, "코수술": {"r": null, "s": "error"}, "코성형": {"r": null, "s": "error"}}, "2026-08-11": {"눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "error"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": null, "s": "error"}, "매몰법": {"r": null, "s": "error"}, "절개법": {"r": null, "s": "error"}, "쌍꺼풀": {"r": null, "s": "error"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "error"}, "인라인": {"r": null, "s": "error"}, "인아웃라인": {"r": null, "s": "error"}, "세미아웃라인": {"r": null, "s": "error"}, "아웃라인": {"r": null, "s": "error"}, "앞트임": {"r": null, "s": "error"}, "위트임": {"r": null, "s": "error"}, "뒤트임": {"r": null, "s": "error"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "error"}, "눈매교정": {"r": null, "s": "error"}, "눈밑지방재배치": {"r": null, "s": "error"}, "눈썹하거상": {"r": null, "s": "error"}, "안면거상": {"r": null, "s": "error"}, "이마거상": {"r": null, "s": "error"}, "미니거상": {"r": null, "s": "error"}, "거상": {"r": null, "s": "error"}, "실리프팅": {"r": null, "s": "error"}, "리프팅": {"r": null, "s": "error"}, "이중턱": {"r": null, "s": "error"}, "남자눈성형": {"r": null, "s": "error"}, "코수술": {"r": null, "s": "error"}, "코성형": {"r": null, "s": "beyond"}}, "2026-08-12": {"눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 49, "s": "ok"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃라인": {"r": 7, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "beyond"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 23, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}}, "2026-08-13": {"압구정쌍수": {"r": 37, "s": "ok"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 35, "s": "ok"}, "자연유착쌍수": {"r": null, "s": "beyond"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃": {"r": 7, "s": "ok"}, "세미아웃라인": {"r": 7, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "beyond"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 21, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}, "2026-08-14": {"압구정쌍수": {"r": null, "s": "beyond"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 27, "s": "ok"}, "자연유착쌍수": {"r": 15, "s": "ok"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃": {"r": 9, "s": "ok"}, "세미아웃라인": {"r": 7, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "beyond"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": 39, "s": "ok"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 21, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}, "2026-08-15": {"압구정쌍수": {"r": 36, "s": "ok"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 45, "s": "ok"}, "자연유착쌍수": {"r": 30, "s": "ok"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃": {"r": 8, "s": "ok"}, "세미아웃라인": {"r": 7, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "beyond"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 42, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}, "2026-08-16": {"압구정쌍수": {"r": 37, "s": "ok"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 46, "s": "ok"}, "자연유착쌍수": {"r": 33, "s": "ok"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": 38, "s": "ok"}, "세미아웃": {"r": 8, "s": "ok"}, "세미아웃라인": {"r": 8, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "beyond"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 23, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}, "2026-08-17": {"압구정쌍수": {"r": 36, "s": "ok"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 43, "s": "ok"}, "자연유착쌍수": {"r": 31, "s": "ok"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃": {"r": 15, "s": "ok"}, "세미아웃라인": {"r": 4, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "beyond"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 22, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}, "2026-08-18": {"압구정쌍수": {"r": 37, "s": "ok"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 10, "s": "ok"}, "자연유착쌍수": {"r": 34, "s": "ok"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃": {"r": 8, "s": "ok"}, "세미아웃라인": {"r": 7, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": 29, "s": "ok"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 27, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}, "2026-08-19": {"압구정쌍수": {"r": 37, "s": "ok"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 39, "s": "ok"}, "자연유착쌍수": {"r": null, "s": "beyond"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃": {"r": 9, "s": "ok"}, "세미아웃라인": {"r": 7, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": 39, "s": "ok"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 23, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}, "2026-08-20": {"압구정쌍수": {"r": 41, "s": "ok"}, "눈성형": {"r": null, "s": "beyond"}, "눈수술": {"r": null, "s": "beyond"}, "눈추천": {"r": null, "s": "beyond"}, "12홀자연유착": {"r": 1, "s": "ok"}, "자연유착": {"r": 45, "s": "ok"}, "자연유착쌍수": {"r": null, "s": "beyond"}, "매몰법": {"r": null, "s": "beyond"}, "절개법": {"r": null, "s": "beyond"}, "쌍꺼풀": {"r": null, "s": "beyond"}, "쌍꺼풀수술": {"r": null, "s": "beyond"}, "눈재수술": {"r": null, "s": "beyond"}, "쌍꺼풀재수술": {"r": null, "s": "beyond"}, "인라인": {"r": null, "s": "beyond"}, "인아웃라인": {"r": null, "s": "beyond"}, "세미아웃": {"r": 9, "s": "ok"}, "세미아웃라인": {"r": 14, "s": "ok"}, "아웃라인": {"r": null, "s": "beyond"}, "트임": {"r": null, "s": "beyond"}, "앞트임": {"r": null, "s": "beyond"}, "위트임": {"r": null, "s": "beyond"}, "뒤트임": {"r": null, "s": "beyond"}, "밑트임": {"r": null, "s": "beyond"}, "상안검": {"r": null, "s": "beyond"}, "하안검": {"r": null, "s": "beyond"}, "눈매교정": {"r": null, "s": "beyond"}, "눈밑지방재배치": {"r": null, "s": "beyond"}, "눈썹하거상": {"r": null, "s": "beyond"}, "리프팅추천": {"r": null, "s": "beyond"}, "거상수술": {"r": null, "s": "beyond"}, "안면거상": {"r": null, "s": "beyond"}, "이마거상": {"r": null, "s": "beyond"}, "미니거상": {"r": null, "s": "beyond"}, "실리프팅": {"r": null, "s": "beyond"}, "리프팅": {"r": null, "s": "beyond"}, "이중턱": {"r": null, "s": "beyond"}, "남자눈성형": {"r": 24, "s": "ok"}, "코수술": {"r": null, "s": "beyond"}, "코성형": {"r": null, "s": "beyond"}, "코추천": {"r": null, "s": "beyond"}}}, "comp": {"압구정쌍수": [{"t": "쌍꺼풀수술로 초절정 여신된 후기 [아몬드 쌍수 후기]💕 #shorts", "c": "아몬드쌍수후기", "m": false}, {"t": "#Shorts 쌍수 절개 vs 비절개 초간단 자가 진단법 🔍 | 케이성형외과 K - PLASTIC SURGERY", "c": "케이성형외과", "m": false}, {"t": "[SUB/성형지식] 회복기간 3일 걸리는 쌍수가 있다고? 직장인, 학생들에게 추천하는 매몰 쌍수에 대해서 알려 드릴게요!", "c": "잘 아는 의사 - 디오성형외과", "m": false}], "눈성형": [{"t": "자꾸만 처지고 늘어지는 눈처짐 솔루션! 중년 눈성형 고민이라면 필수 시청! ✔", "c": "V브이성형외과의원", "m": false}, {"t": "눈성형 잘하는 병원 고르는 꿀 TIP! | 성형외과전문의", "c": "AMOND TV - 아몬드성형외과", "m": false}, {"t": "성형외과 전문의가 꼽은 여돌 최고의 눈 👀👍🏻", "c": "DIVINE 디바인성형외과", "m": false}], "눈수술": [{"t": "눈성형 마스터 하(下) / 나에게 딱 맞는 눈 수술 찾는 법! / 매몰, 눈매교정, 절개  | 성형외과 전문의 전경욱 원장", "c": "의사친[의사사람친구]", "m": false}, {"t": "[눈성형] 중년 처진 눈, 꼭 해야 되는 눈수술과 절대 하면 안 되는 눈수술이 있다?!??", "c": "미호성형외과 MIHO Plastic Surgery", "m": false}, {"t": "[명의 의학백과📖] 열공 망막박리 수술", "c": "고대병원", "m": false}], "눈추천": [{"t": "안과 의사가 꼭 추천하는 눈 영양제💡", "c": "잠실삼성안과", "m": false}, {"t": "눈 영양제 따로 사지 마세요.  안과의사가 추천하는 진짜 눈 영양제 가이드라인.", "c": "교육하는 의사! 이동환TV", "m": false}, {"t": "[눈건강 풀버젼] 루테인 추천을 많이 물어보시는데 그보다 이 영상을 먼저 보길 추천드립니다.", "c": "영양과학자 양과자", "m": false}], "12홀자연유착": [{"t": "12홀 자연유착 + 눈매교정 케이스리뷰ㅣ팝성형외과", "c": "팝성형외과", "m": true}, {"t": "12홀 자연유착 + 눈매교정 케이스리뷰ㅣ팝성형외과", "c": "팝성형외과", "m": true}, {"t": "12홀 #자연유착 아직도 몰라? #shorts", "c": "팝성형외과", "m": true}], "자연유착": [{"t": "이름도 예쁜, 자연유착 쌍꺼풀!  정확히 알려드립니다. #눈성형 #자연유착 #쌍꺼풀수술", "c": "성형공감채널[성공]", "m": false}, {"t": "자연유착 경과 모음 ! 수술전, 수술직후, 한달 경과까지 ! #눈성형 #눈수술  #자연유착", "c": "리아이성형외과 LIEYE Plastic Surgery", "m": false}, {"t": "[2분 요약] 헷갈리는 쌍꺼풀 수술법 4가지 설명✨ | 자연유착 절개 매몰 부분절개 #shorts", "c": "바바성형외과", "m": false}], "자연유착쌍수": [{"t": "이름도 예쁜, 자연유착 쌍꺼풀!  정확히 알려드립니다. #눈성형 #자연유착 #쌍꺼풀수술", "c": "성형공감채널[성공]", "m": false}, {"t": "자연유착 경과 모음 ! 수술전, 수술직후, 한달 경과까지 ! #눈성형 #눈수술  #자연유착", "c": "리아이성형외과 LIEYE Plastic Surgery", "m": false}, {"t": "[2분 요약] 헷갈리는 쌍꺼풀 수술법 4가지 설명✨ | 자연유착 절개 매몰 부분절개 #shorts", "c": "바바성형외과", "m": false}], "매몰법": [{"t": "절개법VS매몰법 | 중년 쌍수는 무조건 절개?! 나한테 맞는 쌍꺼풀수술 방법은 이렇게 고르는 겁니다!! (양연모성형외과|의학박사 양연모)", "c": "부천성형외과-양연모TV", "m": false}, {"t": "(눈성형)정말로 매몰법과 절개법 정확히 알고 계신가요?", "c": "마침표성형외과", "m": false}, {"t": "유연한의사들 [쌍수 편] EP5 매몰법? 누가 해야할까? 우리성형외과☻", "c": "우리성형외과 WOORI beauty TV ", "m": false}], "절개법": [{"t": "(눈성형)정말로 매몰법과 절개법 정확히 알고 계신가요?", "c": "마침표성형외과", "m": false}, {"t": "#Shorts 쌍수 절개 vs 비절개 초간단 자가 진단법 🔍 | 케이성형외과 K - PLASTIC SURGERY", "c": "케이성형외과", "m": false}, {"t": "부분절개 완변 정리 10분 - 쌍수,풀림,재수술,흉터,매몰,실밥,앞트임,눈매교정,재수술", "c": "마침표성형외과", "m": false}], "쌍꺼풀": [{"t": "안검하수 수술과 쌍꺼풀 수술은 똑같을까? #안검하수 #안검하수수술 #쌍꺼풀 #쌍꺼풀수술 #굿닥터인부산 #shorts", "c": "굿닥터인부산", "m": false}, {"t": "쌍꺼풀 수술과 눈매교정 차이 쉽게❕❕ 알려드려요 1분 QnAㅣ박장우 원장", "c": "WJ원진성형외과", "m": false}, {"t": "눈성형 후 흉터가 안 없어진다면? | 절개쌍꺼풀", "c": "AMOND TV - 아몬드성형외과", "m": false}], "쌍꺼풀수술": [{"t": "노인성 안검하수, 쌍꺼풀 수술, 상안검 수술의 정확한 이해  l  송파 서울병원 성형외과 전문의 조성태 과장", "c": "송파 서울병원TV", "m": false}, {"t": "안검하수와 쌍꺼풀 수술 진실에 대해 말하겠습니다!", "c": "보건복지부지정안과전문병원 누네안과병원", "m": false}, {"t": "쌍꺼풀의 종류와 쌍꺼풀수술, 수술시 고려사항", "c": "송파 서울병원TV", "m": false}], "눈재수술": [{"t": "눈 재수술, 실패 없이 성공하는 법", "c": "Wonderful Plastic Surgery_원더풀성형외과", "m": false}, {"t": "쌍꺼풀 재수술 고민이신 분들 꼭 보세요! feat. 재수술 가격은 왜 비쌈?! ㅣ쌍꺼풀 재수술 총정리", "c": "닥토리후니 _ 하니성형외과", "m": false}, {"t": "쌍꺼풀 재수술을 하면 기존 라인은 어떻게 될까?", "c": "아이큐TV - 아이큐성형외과", "m": false}], "쌍꺼풀재수술": [{"t": "#쌍꺼풀재수술 이것만 보면 됩니다❗| #성형외과전문의 #성형외과의사", "c": "올로성형외과", "m": false}, {"t": "쌍꺼풀 재수술 모두 다 할 수 있다? 불가능한 사람 알려드립니다 - 닥터 성익현", "c": "나의닥터", "m": false}, {"t": "쌍꺼풀 재수술 후 안구 통증과 압박감이 생기는 이유!", "c": "심포니 닥터스 ", "m": false}], "인라인": [{"t": "인라인스케이트를 잘 타기 위해 꼭 필요한 두가지 연습 - Inline skate Control training", "c": "이왕중", "m": false}, {"t": "인라인스케이트 뭐 사야돼요?  3륜과 4륜 / 슬라럼도 하고싶고 로드도 하고싶고", "c": "케쎄제 KSJ", "m": false}, {"t": "인라인💞롤러스케이트🛼차이가 뭘까요ᆢ?? #shorts #inline #rollerskate #insta360", "c": "프리롤러 구쌤", "m": false}], "인아웃라인": [{"t": "인아웃?! 세미아웃?! [쌍꺼풀 라인 고민종결]😎 나에게 맞는 라인 찾기💕", "c": "닥토리후니 _ 하니성형외과", "m": false}, {"t": "쌍꺼풀 라인 종류", "c": "Wonderful Plastic Surgery_원더풀성형외과", "m": false}, {"t": "30%는 원하는 인아웃 라인을 할 수 없습니다.(몽고주름,함몰눈,미간이 넓은 눈)", "c": "마침표성형외과", "m": false}], "세미아웃": [{"t": "세미아웃라인 &amp; 인아웃라인 대박나는 눈의 공식🔥 | 과연 내 눈에 맞는 쌍꺼풀 라인은?", "c": "바바성형외과", "m": false}, {"t": "인아웃?! 세미아웃?! [쌍꺼풀 라인 고민종결]😎 나에게 맞는 라인 찾기💕", "c": "닥토리후니 _ 하니성형외과", "m": false}, {"t": "다른 병원은 안 된다는데 왜 원장님은 가능해요? | 세미아웃의 모든 것✨", "c": "닥토리후니 _ 하니성형외과", "m": false}], "세미아웃라인": [{"t": "🚫무작정 이쁘다고 다 하면 안돼요ㅠㅠ세미아웃라인이 되는 눈은 따로 있다?! 모르고 했다가 소세지눈 되기 전에 필수 시청!👀", "c": "아이핏성형외과", "m": false}, {"t": "인아웃?! 세미아웃?! [쌍꺼풀 라인 고민종결]😎 나에게 맞는 라인 찾기💕", "c": "닥토리후니 _ 하니성형외과", "m": false}, {"t": "무조건 세미아웃 라인만 원해요👀", "c": "브이엔성형외과  VN Plastic Surgery", "m": false}], "아웃라인": [{"t": "장원영 쌍꺼풀 라인 #아웃라인", "c": "리미트성형외과", "m": false}, {"t": "나는 아웃라인이 잘 어울릴까? 안 어울릴까?", "c": "에이트성형외과 EIGHT EFFECT", "m": false}, {"t": "프랑스 자수 스티치 | 아웃라인 스티치_Outline Stitch", "c": "SWALLOWGOODS스왈로우굿즈", "m": false}], "트임": [{"t": "트임의 종류 4가지 전격분석! | 트임 맛집 | 성형외과 일타강사 구윤택", "c": "Wonderful Plastic Surgery_원더풀성형외과", "m": false}, {"t": "절대 하지 마세요! 눈성형 맛집에서 ‘절개 뒤트임’을 하지 않는 이유", "c": "DIVINE 디바인성형외과", "m": false}, {"t": "트임성형 실패할까 겁난다면 이 영상 필수 시청! #듀얼트임 #꼬막눈", "c": "바탕성형외과 Batang Plastic Surgery Korea ", "m": false}], "앞트임": [{"t": "앞트임 수술 실패하지 않는 법이 따로 있다?  앞트임 수술 총정리", "c": "바탕성형외과 Batang Plastic Surgery Korea ", "m": false}, {"t": "이런분들은 앞트임 하지마세요~ 앞트임에 대한 모든 정보 총정리!", "c": "닥터혜자", "m": false}, {"t": "앞트임 vs 윗트임 이럴 때 하는 겁니다. 성형외과전문의 박용식 원장", "c": "오엠성형외과 OM Plastic Surgery Korea", "m": false}], "위트임": [{"t": "윗트임 수술이란? #shorts", "c": "바바성형외과", "m": false}, {"t": "앞트임 vs 윗트임 이럴 때 하는 겁니다. 성형외과전문의 박용식 원장", "c": "오엠성형외과 OM Plastic Surgery Korea", "m": false}, {"t": "쌍수 후 윗트임 단독 수술 시 부작용 #shorts", "c": "바바성형외과", "m": false}], "뒤트임": [{"t": "뒤트임vs밑트임 이럴때 하는 겁니다  성형외과전문의 이동은 원장", "c": "오엠성형외과 OM Plastic Surgery Korea", "m": false}, {"t": "이영상 보고 뒤트임, 밑트임 붙는지 그만 묻기!이런 눈은 일단 하세요!", "c": "에이트성형외과 EIGHT EFFECT", "m": false}, {"t": "Sub)성형외과 의사가 솔직하게 고백하는 &#39;뒷트임의 진실&#39; | 뒤트임 수술 전 필수 시청 | 뒤트임 부작용, 뒤밑트임, 듀얼트임, 뒤트임 복원, 외안각 고정술", "c": "마성의 닥터", "m": false}], "밑트임": [{"t": "뒤트임vs밑트임 이럴때 하는 겁니다  성형외과전문의 이동은 원장", "c": "오엠성형외과 OM Plastic Surgery Korea", "m": false}, {"t": "비절개 밑트임하고 나니 절개 밑트임이었다면? #인스타성형외과 #뒤트임 #밑트임 #뒤밑트임 #비절개트임 #비절개밑트임 #비절개뒤트임 #트임성형 #트임부작용 #트임수술", "c": "담당의사 김명철", "m": false}, {"t": "이영상 보고 뒤트임, 밑트임 붙는지 그만 묻기!이런 눈은 일단 하세요!", "c": "에이트성형외과 EIGHT EFFECT", "m": false}], "상안검": [{"t": "쌍꺼풀수술, 상안검수술 차이를 아직도 모르겠다고요?", "c": "아름다운세상TV", "m": false}, {"t": "두통, 피로, 눈 짓무름까지? 상안검 수술 꼭 필요한 증상 2가지 [5분 건강정보]", "c": "서울대 보라매병원", "m": false}, {"t": "상안검수술을 직접 겪어본 의사의 경험담", "c": "젊어지는ST", "m": false}], "하안검": [{"t": "불룩한 눈밑지방, 재배치 해야할까 하안검 해야할까? 눈밑성형 A to Z", "c": "JW정원성형외과", "m": false}, {"t": "(ENG) 눈밑지 vs 하안검 수술, 정하는 기준이 뭘까요???  Under eye fat repositioning or a blepharoplasty?", "c": "닥터혜자", "m": false}, {"t": "👁️하안검 수술하면 애굣살까지 사라질까?❌ #하안검 #하안검수술 #애교살 #동안 #동안성형 #오호성형외과 #박강균원장 #shorts", "c": "호감닥터 박강균 - 오호성형외과", "m": false}], "눈매교정": [{"t": "[SUB] 비절개 눈매교정, 무조건 하면 후회하는 눈 특징 (feat. 쌍수랑 다릅니다!)", "c": "리아이성형외과 LIEYE Plastic Surgery", "m": false}, {"t": "비절개 눈매교정 절대 하지 마! 너는 하면 실패야 닥터 김종규", "c": "나의닥터", "m": false}, {"t": "눈매교정이 정확히 뭔지 알려드릴게요!  쌍꺼플하고 다르다는 거 꼭 아셔야 해요!!      #눈매교정 #졸린눈 #안검하수", "c": "성형공감채널[성공]", "m": false}], "눈밑지방재배치": [{"t": "결국 터질것이 터졌다. 눈밑지방재배치 부작용 90%는 이미 예견된 부작용입니다.", "c": "상담 오선생", "m": false}, {"t": "👀눈밑지방재배치의 모든 것!🙂 (부작용, 지방제거, 회복 기간❔  Q&amp;A 총정리)", "c": "미호성형외과 MIHO Plastic Surgery", "m": false}, {"t": "수술 경력 20년 성형외과 의사가 밝히는 눈밑지방재배치 수술의 포인트", "c": "젊어지는ST", "m": false}], "눈썹하거상": [{"t": "눈썹하거상 효과, 추천 비추천 케이스, 흉터, 회복기간 Q&amp;Aㅣ박장우원장", "c": "WJ원진성형외과", "m": false}, {"t": "눈썹하거상술 후 가장 많이 하는 질문! 싹~다 대답해드립니다 (흉터, 부기, 통증, 부작용, 회복기간, 관리방법) - 의학박사 백승준", "c": "섬세한 백박사", "m": false}, {"t": "눈썹거상술 하지 말라고요??🙅🏻‍♂️ 쳐진 눈꺼풀을 올린다는 눈썹거상술의 진실!! korean subbrow lift", "c": "닥터호호", "m": false}], "리프팅추천": [{"t": "리프팅 5대장 비교 분석! 이 영상만 보면 끝!ㅣ써마지, 울쎄라, 울써마지, 온다리프팅, 올타이트, 티타늄 리프팅, 리프팅 추천, 탄력, 처짐, 볼살, 잠실 피부과, 송파 피부과", "c": "피부구조대 오가나셀", "m": false}, {"t": "그만 속으세요 제발! 의사들이 숨기는 가성비 리프팅 시술 1위ㅣ주름,탄력,윤곽,모공 레이저 리프팅 총요약ㅣ동탄 의사가 알려주는 리프티 시술 종류", "c": "아는닥터 이원장", "m": false}, {"t": "비싼 울쎄라 써마지 받아도 얼굴이 다시 처지는 이유ㅣ집에서 ‘이것’만 하면 누구나 쉽게 동안이 될 수 있습니다!", "c": "박지윤의 피부 설명서", "m": false}], "거상수술": [{"t": "❤️세자매의 안면거상 수술후기📝| 솔직후기, 회복과정, 불편한점, 외출은 언제부터?", "c": "당기는의사 닥터미노", "m": false}, {"t": "건강한 얼굴을 위한 안면거상수술 지금 알아볼까요?!😋🤩", "c": "라비앙 성형외과", "m": false}, {"t": "거상수술 무조건 하지 마세요! [거상수술에 대한 모든 것 : 종류, 효과, 부작용, 회복, 재수술]", "c": "리아성형외과 REA PS", "m": false}], "안면거상": [{"t": "❤️세자매의 안면거상 수술후기📝| 솔직후기, 회복과정, 불편한점, 외출은 언제부터?", "c": "당기는의사 닥터미노", "m": false}, {"t": "안면거상술 상담 받기 전 알아야 할 정보 2가지 꼭 확인하세요!  l 수술 종류 l 수술 비용", "c": "닥터세이렌TV", "m": false}, {"t": "상담 전 단 20분, 안면거상 성공 여부가 달라집니다. (타 병원 시청금지🚫)", "c": "에이징엘 성형외과 Aging L FACE LIFTING SURGERY", "m": false}], "이마거상": [{"t": "내시경 이마거상술, 부작용은 없을까요? / 제이제이성형외과 홍진주, 김학영", "c": "의학채널 비온뒤", "m": false}, {"t": "이마거상 언제까지 유지될까? 대체 유지기간이 몇 년인가요?! [테일러성형외과]", "c": "테일러성형외과Tailor Plastic Surgery Korea", "m": false}, {"t": "이마거상, 가족에게는 안 해주는 이유 | 간단하게 할 수 있는 눈처짐 자가진단법 | 실리프팅, 안검하수, 눈썹하거상 | 라인만드는 의사 권병소", "c": "라인만드는 의사 DR.권병소", "m": false}], "미니거상": [{"t": "인생이 달라지는 3대 미니거상?! 효과부터 흉터까지 완벽 정리", "c": "메이드영성형외과", "m": false}, {"t": "미니안면거상술,미니거상,안면거상술의 차이는 이렇게 나뉩니다(리프팅/성형/잘하는병원/리저브성형외과)", "c": "리저브TV", "m": false}, {"t": "미니거상 하지마세요, 그런 거상술은 효과 없고 지속되지 않습니다 - 연세UP성형외과", "c": "압구정역연세UP성형외과", "m": false}], "실리프팅": [{"t": "실리프팅 후 이 2가지 증상 보인다면, 꼭 제거하세요. ㅣ 실리프팅 부작용 ㅣ 실리프팅 주의사항", "c": "리프팅 장인 김수현", "m": false}, {"t": "실리프팅의 종류 및 붓기, 부작용, 유지기간까지! 40대 50대 피부처짐이 걱정이라면? 필수 시청! | 성형외과 전문의 전경욱 (eng. korean beauty clinic)", "c": "의사친[의사사람친구]", "m": false}, {"t": "실리프팅 했는데 얼굴이 너무 이상해서 싫어요", "c": "닥터 리프팅", "m": false}], "리프팅": [{"t": "&quot;비싼리프팅? 3달만에 처져요&quot; 집에서 매일 5분! 노화 막는 최고의 비법을 15년차 피부과 전문의가 알려드립니다.", "c": "박경열의 피부상담소", "m": false}, {"t": "울써마지 리프팅 효과나는 2026년 보톡스 트렌드", "c": "동네 의사 이상욱", "m": false}, {"t": "리프팅 한다면 무조건 이것부터 하세요! 피부과의사가 추천하는 시술 #리프팅시술 #v라인 #피부과 #피부과전문의", "c": "피부텐텐 · 피부가 예뻐지는 10분 ", "m": false}], "이중턱": [{"t": "이중턱 고민 끝! 효과 좋은 시술 3가지", "c": "Wonderful Plastic Surgery_원더풀성형외과", "m": false}, {"t": "이중턱근육묶기 3주차 효과는? #디엘성형외과 #이중턱근육묶기", "c": "디엘성형외과 DL plastic surgery", "m": false}, {"t": "이중턱,무턱을 뮤잉 운동으로 없앨 수 있나요?", "c": "나나TV - 나나성형외과", "m": false}], "남자눈성형": [{"t": "쌍수 상담 전 필수 시청! | 남자 눈 성형 질문 Top5", "c": "함기원의 성형공간", "m": false}, {"t": "티 안나는 남자눈성형, 90%가 모르는 사실 전부 공개!", "c": "AMOND TV - 아몬드성형외과", "m": false}, {"t": "남자 무쌍, 속쌍커풀 + 눈매교정 하면 차은우, 송강?? 강남 성형외과 원장이 말하는 남자 눈 성형 꿀팁", "c": "성형천재 윤태경", "m": false}], "코수술": [{"t": "재수술 없는 코 성형은 이렇게 합니다ㅣ코 성형 전문의가 알려줍니다", "c": "박치열의 코멘터리", "m": false}, {"t": "코수술시 비중격연골만 사용해도될까? 추가 연골이 필요한 경우는 ? #코성형", "c": "디엘성형외과 DL plastic surgery", "m": false}, {"t": "코수술 후관리!! 치료 과정 전부 공개!! #코성형 #강남성형외과 #plasticsurgery", "c": "디엘성형외과 DL plastic surgery", "m": false}], "코성형": [{"t": "코 성형 최악의 난이도 TOP 1은? 코 수술만 9000번, 전문의가 뽑은 어려운 코 월드컵", "c": "박치열의 코멘터리", "m": false}, {"t": "무서운 코 성형 부작용! &#39;이것&#39;만 알아도 확 줄어듭니다! (코 성형 전문 의사가 알려주는 부작용의 모든 것)", "c": "박치열의 코멘터리", "m": false}, {"t": "코성형 실비 이것만은 꼭 알고 하자! (코성형 실비 가능한 3가지 질환)", "c": "박치열의 코멘터리", "m": false}], "코추천": [{"t": "코링코 신상...진짜 좋아💦 노글루 속눈썹 추천! (feat.코링코 6차마켓🎁)", "c": "잉구EEN9", "m": false}, {"t": "코교정기 사용법 효과 후기 코집게 코뽕 추천! 뷰티영 코노피 코라인 보정기", "c": "뷰티영", "m": false}, {"t": "코 시술 어떤 것이 좋을까?│코 시술 종류와 추천 &amp; 비추천", "c": "슈가성형외과", "m": false}]}, "offtopic": ["인라인", "거상"], "top_n": 50}</script>
+<script>
+var P=JSON.parse(document.getElementById('p').textContent);
+init(P);
+function init(P){
+var KW=P.keywords,H=P.history,DATES=P.dates,COMP=P.comp||{},OFF=new Set(P.offtopic||[]);
+var latest=DATES[DATES.length-1];
+document.getElementById('ch').textContent=P.channel;
+document.getElementById('ld').textContent=latest;
+document.getElementById('nk').textContent=KW.length;
+document.getElementById('gen').textContent=P.generated;
+document.querySelectorAll('.tab').forEach(function(t){t.onclick=function(){document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('on');});t.classList.add('on');document.querySelectorAll('.view').forEach(function(v){v.classList.remove('on');});document.getElementById('view-'+t.dataset.v).classList.add('on');};});
+document.querySelectorAll('.stab').forEach(function(t){t.onclick=function(){document.querySelectorAll('.stab').forEach(function(x){x.classList.remove('on');});t.classList.add('on');document.getElementById('num-dates').style.display='none';document.getElementById('num-detail').style.display='none';document.getElementById('num-trend').style.display='none';if(t.dataset.s==='dates')document.getElementById('num-dates').style.display='block';else{document.getElementById('num-trend').style.display='block';drawTrend();}};});
+function dayStats(d){var h=H[d]||{},ok=0,beyond=0,err=0,sum=0;KW.forEach(function(kw){var v=h[kw];if(!v)return;if(v.s==='ok'){ok++;sum+=v.r;}else if(v.s==='beyond')beyond++;else if(v.s==='error')err++;});return{ok:ok,beyond:beyond,err:err,avg:ok?Math.round(sum/ok):null};}
+document.getElementById('dgrid').innerHTML=DATES.slice().reverse().map(function(dt){var s=dayStats(dt);return '<div class="dcard" data-d="'+dt+'"><div class="d">'+dt+(dt===latest?' <span class="tag ok">최신</span>':'')+'</div><div class="row"><span>TOP50 진입</span><b>'+s.ok+'개</b></div><div class="row"><span>평균 순위</span><b>'+(s.avg?s.avg+'위':'—')+'</b></div><div class="row"><span>50위 밖</span><b>'+s.beyond+'개</b></div><div class="row"><span>수집 오류</span><b>'+s.err+'개</b></div><div class="go">상세 보기 →</div></div>';}).join('');
+document.querySelectorAll('.dcard').forEach(function(c){c.onclick=function(){showDetail(c.dataset.d);};});
+var dSort='rank',dDir=1;
+function showDetail(dt){document.getElementById('num-dates').style.display='none';document.getElementById('num-detail').style.display='block';document.getElementById('detailDate').textContent=dt+' 순위 상세';var s=dayStats(dt);document.getElementById('detailKpis').innerHTML=[{l:'TOP50 진입',v:s.ok+'개',c:s.ok?'good':''},{l:'평균 순위',v:s.avg?s.avg+'위':'—'},{l:'50위 밖',v:s.beyond+'개'},{l:'수집 오류',v:s.err+'개',c:s.err?'bad':'good'},{l:'최고 순위',v:(function(){var rs=KW.map(function(k){return H[dt][k];}).filter(function(v){return v&&v.s==='ok';}).map(function(v){return v.r;});return rs.length?Math.min.apply(null,rs)+'위':'—';})(),c:'good'}].map(function(k){return '<div class="kpi '+(k.c||'')+'"><div class="l">'+k.l+'</div><div class="v">'+k.v+'</div></div>';}).join('');renderDetail(dt);}
+function renderDetail(dt){var d=H[dt];var rows=KW.map(function(kw){return{kw:kw,r:(d[kw]&&d[kw].s==='ok')?d[kw].r:null,s:d[kw]?d[kw].s:'nodata',off:OFF.has(kw)};});rows.sort(function(a,b){if(dSort==='kw')return dDir*a.kw.localeCompare(b.kw,'ko');if(dSort==='st')return dDir*(''+a.s).localeCompare(''+b.s);return dDir*((a.r===null?999:a.r)-(b.r===null?999:b.r));});document.querySelector('#detailTable tbody').innerHTML=rows.map(function(x){var rk=x.r!==null?'<span class="rankbig '+(x.r<=10?'g':'k')+'">'+x.r+'위</span>':'—';var st=x.s==='ok'?'<span class="tag ok">진입</span>':x.s==='beyond'?'<span class="tag beyond">50위 밖</span>':x.s==='error'?'<span class="tag err">오류</span>':'<span class="tag beyond">-</span>';var off=x.off?' <span class="tag off">의도불일치</span>':'';return '<tr><td>'+x.kw+off+'</td><td class="num">'+rk+'</td><td>'+st+'</td></tr>';}).join('');}
+document.querySelectorAll('#detailTable th').forEach(function(th){th.onclick=function(){var k=th.dataset.k;if(k===dSort)dDir*=-1;else{dSort=k;dDir=1;}renderDetail(document.getElementById('detailDate').textContent.split(' ')[0]);};});
+document.getElementById('backBtn').onclick=function(){document.getElementById('num-detail').style.display='none';document.getElementById('num-dates').style.display='block';};
+function drawTrend(){var cv=document.getElementById('trendCanvas'),ctx=cv.getContext('2d');var W=cv.width,Hh=cv.height,pad=30;ctx.clearRect(0,0,W,Hh);var vals=DATES.map(function(d){return dayStats(d).ok;});var mx=Math.max.apply(null,[5].concat(vals));ctx.strokeStyle='#26333f';ctx.beginPath();ctx.moveTo(pad,Hh-pad);ctx.lineTo(W-10,Hh-pad);ctx.stroke();ctx.font='11px sans-serif';var n=DATES.length;ctx.strokeStyle='#30a46c';ctx.lineWidth=2;ctx.beginPath();DATES.forEach(function(d,i){var x=n>1?pad+i/(n-1)*(W-pad-15):W/2;var y=Hh-pad-(vals[i]/mx)*(Hh-2*pad);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();DATES.forEach(function(d,i){var x=n>1?pad+i/(n-1)*(W-pad-15):W/2;var y=Hh-pad-(vals[i]/mx)*(Hh-2*pad);ctx.fillStyle='#30a46c';ctx.beginPath();ctx.arc(x,y,3,0,7);ctx.fill();ctx.fillStyle='#93a4b5';ctx.fillText(vals[i],x-4,y-8);if(n<=20||i%Math.ceil(n/20)===0)ctx.fillText(d.slice(5),x-14,Hh-pad+15);});var hh='<tr><th style="font-size:10px;color:#6b7d8f;padding:2px 6px"></th>'+DATES.map(function(d){return '<th style="font-size:9px;color:#6b7d8f;font-weight:400;padding:2px">'+d.slice(5)+'</th>';}).join('')+'</tr>';KW.forEach(function(kw){hh+='<tr><td style="font-size:10px;color:#93a4b5;padding:1px 6px;white-space:nowrap;text-align:right">'+kw+'</td>'+DATES.map(function(d){var v=H[d][kw];var bg=v&&v.s==='ok'?'#30a46c':v&&v.s==='beyond'?'#3b4b5c':v&&v.s==='error'?'#e5484d':'#232e3a';var tt=v&&v.s==='ok'?v.r+'위':v?v.s:'-';return '<td title="'+kw+' '+d+' '+tt+'" style="width:16px;height:15px;background:'+bg+';border:1px solid #0f1720"></td>';}).join('')+'</tr>';});document.getElementById('heat').innerHTML=hh;}
+var d=H[latest];
+function rankOf(kw){return(d[kw]&&d[kw].s==='ok')?d[kw].r:null;}
+function tier(kw){var r=rankOf(kw);if(r===null)return 4;if(r<=10)return 1;if(r<=30)return 2;return 3;}
+var inTop=KW.filter(function(k){return rankOf(k)!==null;});
+document.getElementById('cKpis').innerHTML=[{l:'TOP50 진입',v:inTop.length+'개',c:'good'},{l:'TOP10 진입',v:KW.filter(function(k){var r=rankOf(k);return r&&r<=10;}).length+'개',c:'good'},{l:'진입 임박(11-30)',v:KW.filter(function(k){var r=rankOf(k);return r&&r>10&&r<=30;}).length+'개',c:'warn'},{l:'의도 불일치',v:[].concat(Array.from(OFF)).filter(function(k){return KW.indexOf(k)>=0;}).length+'개',c:'bad'},{l:'신규 공략 필요',v:KW.filter(function(k){return rankOf(k)===null&&!OFF.has(k);}).length+'개'}].map(function(k){return '<div class="kpi '+(k.c||'')+'"><div class="l">'+k.l+'</div><div class="v">'+k.v+'</div></div>';}).join('');
+var acts=[];
+KW.filter(function(k){var r=rankOf(k);return r&&r>10&&r<=20;}).sort(function(a,b){return rankOf(a)-rankOf(b);}).forEach(function(k){acts.push({t:'「'+k+'」 '+rankOf(k)+'위 → TOP10 집중 공략',d:'상위 10위 진입이 눈앞입니다. 이 키워드 전용 콘텐츠를 이번주 1~2편 추가 발행하고, 기존 상위 영상의 제목·썸네일을 키워드가 앞에 오도록 최적화하세요.'});});
+KW.filter(function(k){var r=rankOf(k);return r&&r<=10;}).sort(function(a,b){return rankOf(a)-rankOf(b);}).forEach(function(k){acts.push({t:'「'+k+'」 '+rankOf(k)+'위 사수 + 롱테일 확장',d:'이미 상위권입니다. "'+k+'" 세부 주제(후기·회복·비용 등) 시리즈로 상위권을 굳히세요.'});});
+var offNow=Array.from(OFF).filter(function(k){return KW.indexOf(k)>=0;});
+if(offNow.length)acts.push({t:'의도 불일치 키워드 재검토 ('+offNow.join(', ')+')',d:'이 키워드들은 성형이 아닌 다른 분야가 상위를 차지합니다. 구체적 조합 키워드로 대체를 권장합니다.'});
+document.getElementById('actions').innerHTML=acts.slice(0,6).map(function(a,i){return '<div class="act"><div class="rn">'+(i+1)+'</div><div><div class="at">'+a.t+'</div><div class="ad">'+a.d+'</div></div></div>';}).join('')||'<div class="note">아직 TOP50 진입 키워드가 없어요. 데이터가 쌓이면 우선 액션이 표시됩니다.</div>';
+function tierList(t){return KW.filter(function(k){return tier(k)===t&&!(t===3&&OFF.has(k));}).sort(function(a,b){return(rankOf(a)==null?999:rankOf(a))-(rankOf(b)==null?999:rankOf(b));});}
+var oppHtml=[{cls:'t1',h:'🏆 상위권 (1-10위) — 사수 & 확장',dsc:'이미 상위 노출 중. 롱테일·시리즈로 방어하세요.',ks:tierList(1)},{cls:'t2',h:'🚀 기회 (11-30위) — 조금만 더',dsc:'상위권 진입이 가시권입니다.',ks:tierList(2)},{cls:'t3',h:'🌱 진입 임박 (31-50위)',dsc:'노출이 시작된 단계입니다.',ks:tierList(3)}].map(function(o){return '<div class="tier '+o.cls+'"><h3>'+o.h+'</h3><div class="desc">'+o.dsc+'</div><div class="chips">'+(o.ks.length?o.ks.map(function(k){return '<span class="chip">'+k+' <b>'+rankOf(k)+'위</b></span>';}).join(''):'<span class="note">해당 없음</span>')+'</div></div>';}).join('');
+var gap=KW.filter(function(k){return rankOf(k)===null&&!OFF.has(k);});
+var riskHtml='<div class="tier t4"><h3>🎯 신규 공략 (50위 밖)</h3><div class="desc">아직 노출되지 않는 키워드입니다. 아래 아이디어를 참고해 콘텐츠를 제작하세요.</div><div class="chips">'+gap.map(function(k){return '<span class="chip">'+k+'</span>';}).join('')+'</div></div>';
+document.getElementById('oppRisk').innerHTML=oppHtml+riskHtml;
+var IDEAS=[function(kw){return '「'+kw+'」 전후 사진 + 실제 회복 과정 (수술직후~1개월)';},function(kw){return '「'+kw+'」 부작용·오해, 전문의가 팩트체크';},function(kw){return '「'+kw+'」 vs 다른 방법 비교 — 자가진단 체크리스트';},function(kw){return '「'+kw+'」 비용·수술시간·회복기간 1분 총정리 Q&A';},function(kw){return '「'+kw+'」 이런 분께 추천 / 이런 분은 비추천';},function(kw){return '「'+kw+'」 실제 후기 인터뷰';},function(kw){return '「'+kw+'」 자주 묻는 질문 TOP5 #shorts';}];
+function ideasFor(kw,seed){var o=[];for(var i=0;i<3;i++)o.push(IDEAS[(seed+i*2)%IDEAS.length](kw));return o;}
+var tierLabel={1:'🏆 상위권',2:'🚀 기회',3:'🌱 진입임박',4:'🎯 신규공략'};
+var ideaKws=tierList(2).concat(tierList(3)).concat(KW.filter(function(k){return tier(k)===4&&!OFF.has(k);})).concat(tierList(1)).slice(0,24);
+document.getElementById('ideas').innerHTML=ideaKws.map(function(kw,idx){var r=rankOf(kw),t=tier(kw);return '<div class="ideacard"><div class="kw">'+kw+' <span class="tag '+(r?'ok':'beyond')+'">'+(r?r+'위':'미진입')+'</span> <span style="font-size:11px;color:var(--faint)">'+tierLabel[t]+'</span></div><ul>'+ideasFor(kw,idx).map(function(x){return '<li>'+x+'</li>';}).join('')+'</ul></div>';}).join('');
+var PATTERNS=[{re:/vs|VS|비교|차이/,label:'비교(VS)'},{re:/총정리|정리|모든것/,label:'총정리'},{re:/자가진단|진단|체크|내 눈|내눈/,label:'자가진단'},{re:/부작용|오해|사기|진실|하지마|후회|실패/,label:'부작용·오해'},{re:/Q&A|QnA|질문|묻는/i,label:'Q&A'},{re:/후기|경과|전후|리뷰/,label:'후기·전후'},{re:/shorts|쇼츠/i,label:'쇼츠'},{re:/추천|비추천|이런분/,label:'추천/비추천'}];
+var compKws=Object.keys(COMP).filter(function(k){return COMP[k]&&COMP[k].length;});
+document.getElementById('comp').innerHTML=compKws.map(function(kw){var vids=COMP[kw],r=rankOf(kw),patt={};vids.forEach(function(v){PATTERNS.forEach(function(p){if(p.re.test(v.t))patt[p.label]=1;});});var off=OFF.has(kw);return '<div class="compkw"><div class="h">'+kw+' <span class="tag '+(r?'ok':'beyond')+'">'+(r?'우리 '+r+'위':'우리 미진입')+'</span>'+(off?' <span class="tag off">의도불일치</span>':'')+'</div>'+vids.map(function(v,i){return '<div class="vid '+(v.m?'mine':'')+'"><span class="n">'+(i+1)+'</span><div><div class="tt">'+v.t+(v.m?' ✅':'')+'</div><div class="cc">'+v.c+'</div></div></div>';}).join('')+(Object.keys(patt).length?'<div class="pat">'+Object.keys(patt).map(function(p){return '<span class="p">#'+p+'</span>';}).join('')+'</div>':'')+'</div>';}).join('');
 }
-
-/* 사전을 긴 패턴 우선으로 정렬 → "팝성형외과"가 "팝성형"보다 먼저 매칭됨 */
-const SORTED_CLINICS = CLINIC_PATTERNS
-  .map(c => ({ name: c.name, patterns: c.patterns.map(normalize) }))
-  .sort((a, b) =>
-    Math.max(...b.patterns.map(p => p.length)) -
-    Math.max(...a.patterns.map(p => p.length))
-  );
-
-/* ---------- 2. 한 행에서 병원명 추출 ----------
- * 채널명 > 제목 > 설명 순으로 신뢰. 못 찾으면 '기타'.
- */
-function extractClinic(row) {
-  const sources = [row[FIELD.channel], row[FIELD.title], row[FIELD.description]];
-  for (const src of sources) {
-    const hay = normalize(src);
-    if (!hay) continue;
-    for (const clinic of SORTED_CLINICS) {
-      if (clinic.patterns.some(p => p && hay.includes(p))) return clinic.name;
-    }
-  }
-  return '기타';
-}
-
-/* ---------- 3. 병원별 노출 점유율 집계 ----------
- * options:
- *   topN     : 몇 위까지를 '노출'로 볼지 (기본 10)
- *   weighted : true면 상위 순위에 가중치(1/rank)를 줘서 점유율 계산
- *   includeEtc : '기타'(미매칭)를 결과에 포함할지
- *
- * 반환: [{ clinic, slots, score, share, keywords, avgRank, videos }] 점유율 내림차순
- */
-function aggregateByClinic(rows, options = {}) {
-  const { topN = 10, weighted = false, includeEtc = false } = options;
-
-  const inRange = rows.filter(r => Number(r[FIELD.rank]) >= 1 && Number(r[FIELD.rank]) <= topN);
-  const weightOf = rank => (weighted ? 1 / Number(rank) : 1);
-  const totalScore = inRange.reduce((sum, r) => sum + weightOf(r[FIELD.rank]), 0);
-
-  const map = new Map();
-  for (const row of inRange) {
-    const clinic = extractClinic(row);
-    if (!map.has(clinic)) {
-      map.set(clinic, { clinic, slots: 0, score: 0, rankSum: 0, keywords: new Set(), videos: [] });
-    }
-    const acc = map.get(clinic);
-    const rank = Number(row[FIELD.rank]);
-    acc.slots += 1;
-    acc.score += weightOf(rank);
-    acc.rankSum += rank;
-    acc.keywords.add(row[FIELD.keyword]);
-    acc.videos.push(row);
-  }
-
-  return [...map.values()]
-    .filter(a => includeEtc || a.clinic !== '기타')
-    .map(a => ({
-      clinic: a.clinic,
-      slots: a.slots,                                        // 상위노출 차지 횟수
-      share: totalScore ? +(a.score / totalScore * 100).toFixed(1) : 0, // 노출 점유율 %
-      keywords: a.keywords.size,                             // 노출된 키워드 수
-      avgRank: +(a.rankSum / a.slots).toFixed(1),            // 평균 순위
-      videos: a.videos.sort((x, y) => x[FIELD.rank] - y[FIELD.rank]),
-    }))
-    .sort((a, b) => b.share - a.share || a.avgRank - b.avgRank);
-}
-
-/* ---------- 4. 사용 예시 ----------
- * const ranking = aggregateByClinic(rawRows, { topN: 10, weighted: false });
- * ranking.forEach((r, i) => {
- *   console.log(`${i + 1}위 ${r.clinic} — 점유율 ${r.share}% / ${r.slots}건 / 평균 ${r.avgRank}위`);
- * });
- *
- * 기존 표 렌더링 함수에서 "영상 1개 = 1행"을 "병원 1개 = 1행"으로 바꾸고,
- * 행 클릭 시 r.videos를 펼쳐 보여주면 드릴다운까지 됩니다.
- */
-
-/* ---------- 5. 매칭 점검용 (초기 세팅 때 꼭 한 번) ---------- */
-function auditUnmatched(rows) {
-  const etc = rows.filter(r => extractClinic(r) === '기타');
-  const byChannel = {};
-  etc.forEach(r => {
-    const c = r[FIELD.channel] || '(채널명 없음)';
-    byChannel[c] = (byChannel[c] || 0) + 1;
-  });
-  return Object.entries(byChannel).sort((a, b) => b[1] - a[1]); // [채널명, 미매칭 건수]
-}
+</script></body></html>
