@@ -2,7 +2,8 @@ name: collect-youtube-rank
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "17 0 * * *"
+    - cron: "23 1 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -26,7 +27,7 @@ jobs:
 
       - name: Collect ranks
         env:
-          YT_API_KEY: ${{ github.event_name == 'schedule' && secrets.YT_API_KEY || secrets.YT_API_KEY_TEST }}
+          YT_API_KEY: ${{ github.event_name != 'schedule' && secrets.YT_API_KEY_TEST || (github.event.schedule == '17 0 * * *' && secrets.YT_API_KEY || secrets.YT_API_KEY_TEST) }}
         run: python youtube_rank_collector.py
 
       - name: Commit results (with retry)
