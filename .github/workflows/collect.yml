@@ -4,7 +4,12 @@ on:
   schedule:
     - cron: "17 0 * * *"
     - cron: "23 1 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force re-collect even if today already collected"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -28,6 +33,7 @@ jobs:
       - name: Collect ranks
         env:
           YT_API_KEY: ${{ github.event_name != 'schedule' && secrets.YT_API_KEY_TEST || (github.event.schedule == '17 0 * * *' && secrets.YT_API_KEY || secrets.YT_API_KEY_TEST) }}
+          FORCE_RUN: ${{ inputs.force && '1' || '0' }}
         run: python youtube_rank_collector.py
 
       - name: Commit results (with retry)
