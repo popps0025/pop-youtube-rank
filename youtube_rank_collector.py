@@ -93,6 +93,12 @@ def main():
     history = data.get("history", {})
     comphist = data.get("comphist", {})
 
+    if today in history and os.environ.get("FORCE_RUN") != "1":
+        _okc = sum(1 for _v in history[today].values() if _v.get("s") == "ok")
+        if _okc > 0:
+            print("skip: %s already collected (ok=%d)" % (today, _okc))
+            return
+
     dayrec = {}
     comp = {}
     ok_cnt = 0
